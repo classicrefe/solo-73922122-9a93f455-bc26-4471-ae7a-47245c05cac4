@@ -26,12 +26,12 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import requests
 
-BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8010")
 DSN = os.environ.get(
     "DATABASE_URL", "postgresql://envmon@127.0.0.1:5544/envmon"
 )
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app"))
 APP_PORT = int(os.environ.get("APP_PORT", "8010"))
+BASE = os.environ.get("BASE_URL", f"http://127.0.0.1:{APP_PORT}")
 STATIONS = [f"ST{i:03d}" for i in range(1, 9)]
 
 _failures: list[str] = []

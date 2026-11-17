@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import migrator
+import qc
 from db import connect, ensure_meta_tables, log, logs_since
 from migrator import (
     AlreadyDone,
@@ -29,6 +30,7 @@ STATIC = Path(__file__).parent / "static"
 @app.on_event("startup")
 def _startup():
     ensure_meta_tables()
+    qc.ensure_trigger()
     log("应用启动，元数据表就绪")
 
 
@@ -300,6 +302,47 @@ def api_debug_crash():
     log("[debug] 收到崩溃指令，进程即将硬退出（模拟宕机）")
     threading.Timer(0.2, lambda: os._exit(1)).start()
     return {"crashing": True}
+
+
+# ------------------------------------------------------------- 质控异常报告
+@app.get("/api/qc/options")
+def api_qc_options():
+    return qc.list_options()
+
+
+class QcComputeReq(BaseModel):
+    station_id: str
+    month: str
+    threshold: int = Field(ge=qc.THRESHOLD_MIN, le=qc.THRESHOLD_MAX)
+    delay_ms: int = Field(default=0, ge=0, le=60000)
+    fail_after_snapshot: bool = False  # 故障注入（演示/自测用）
+
+
+@app.get("/api/qc/report")
+def api_qc_report(station_id: str, month: str, threshold: int):
+    try:
+        m = parse_month(month)
+        return qc.get_report(station_id, m, threshold)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/qc/recompute")
+def api_qc_recompute(req: QcComputeReq):
+    try:
+        m = parse_month(req.month)
+        rid = qc.start_compute(
+            req.station_id, m, req.threshold,
+            delay_ms=req.delay_ms,
+            fail_after_snapshot=req.fail_after_snapshot,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    log(f"[质控] 开始重算 {req.station_id} {req.month} 阈值 {req.threshold}"
+        f"（报告 #{rid}）")
+    return {"started": True, "report_id": rid}
 
 
 # --------------------------------------------------------------------- 校验

@@ -44,6 +44,11 @@
          white-space:pre-wrap; }
   .ok { color:var(--ok); } .bad { color:var(--bad); } .dim { color:var(--dim); }
   .mono { font-family:ui-monospace,Consolas,monospace; }
+  .tag.stale { background:#4a3f22; color:var(--warn); }
+  .tag.comp  { background:#20365c; color:var(--acc); }
+  #qcSummary { font-size:13px; margin:8px 0; }
+  #qcSummary .stale-note { color:var(--warn); }
+  .qc-scroll { max-height:280px; overflow:auto; }
 </style>
 </head>
 <body>
@@ -122,6 +127,34 @@
       <button onclick="doVerify()">校验</button>
     </div>
     <div id="vResult" class="mono" style="font-size:13px;white-space:pre-wrap">—</div>
+  </section>
+
+  <!-- 质控异常报告 -->
+  <section class="card wide">
+    <h2>⑥ 质控异常报告（测值持续不变 · 相邻整点等值连段，UTC 月界截断）</h2>
+    <div class="row">
+      <label>站号</label><select id="qcStation"></select>
+      <label>月份(UTC)</label><select id="qcMonth"></select>
+      <label>连续次数阈值</label>
+      <select id="qcThreshold">
+        <option>3</option><option>4</option><option>5</option><option>6</option>
+        <option>7</option><option>8</option><option>9</option><option>10</option>
+        <option>11</option><option>12</option>
+      </select>
+      <button onclick="doQcLoad()">查看报告</button>
+      <button onclick="doQcRecompute()">重算</button>
+      <label><input type="checkbox" id="qcAuto"> 每秒刷新</label>
+      <label>慢计算(ms)</label><input id="qcDelay" type="number" value="0" style="width:70px">
+    </div>
+    <div id="qcStatus" class="mono dim" style="font-size:12px">—</div>
+    <div id="qcSummary">—</div>
+    <div class="qc-scroll">
+      <table id="qcRows">
+        <thead><tr><th>#</th><th>起(UTC)</th><th>止(UTC)</th><th>测值</th><th>条数</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="qcAttempts" class="mono dim" style="font-size:12px;margin-top:8px"></div>
   </section>
 
   <!-- 日志 -->
@@ -267,6 +300,87 @@ async function doVerify() {
     `结论: <span class="${cls}">${r.consistent ? '一致 ✓' : '不一致 ✗'}</span>`;
 }
 
+/* ---------------- 质控异常报告 ---------------- */
+function qcTag(status) {
+  if (status === 'ready') return '<span class="tag done">有效</span>';
+  if (status === 'stale') return '<span class="tag stale">已过期</span>';
+  if (status === 'computing') return '<span class="tag comp">计算中</span>';
+  if (status === 'superseded') return '<span class="tag fail">已作废(并发变更)</span>';
+  if (status === 'failed') return '<span class="tag fail">计算失败</span>';
+  return `<span class="tag idle">${status || '无'}</span>`;
+}
+
+async function loadQcOptions() {
+  try {
+    const o = await api('/api/qc/options');
+    for (const id of ['qcStation', 'qcMonth']) {
+      const el = document.getElementById(id);
+      const vals = id === 'qcStation' ? o.stations : o.months;
+      if (el.dataset.sig === vals.join(',')) continue;
+      el.dataset.sig = vals.join(',');
+      el.innerHTML = vals.map(v => `<option>${v}</option>`).join('');
+    }
+  } catch (e) {}
+}
+
+function qcParams() {
+  return {
+    station_id: document.getElementById('qcStation').value,
+    month: document.getElementById('qcMonth').value,
+    threshold: +document.getElementById('qcThreshold').value,
+  };
+}
+
+async function doQcLoad() {
+  const p = qcParams();
+  if (!p.station_id || !p.month) return;
+  let r;
+  try {
+    r = await api(`/api/qc/report?station_id=${encodeURIComponent(p.station_id)}` +
+      `&month=${p.month}&threshold=${p.threshold}`);
+  } catch (e) {
+    document.getElementById('qcSummary').innerHTML =
+      `<span class="bad">加载失败：${e.message}</span>`;
+    return;
+  }
+  document.getElementById('qcStatus').textContent =
+    `${p.station_id} · ${p.month} · 阈值 ${p.threshold} · ` +
+    `变更代次 ${r.watch_gen}` + (r.watch_updated_at ? `（${r.watch_updated_at} 更新）` : '') +
+    (r.computing ? ' · 正在计算…' : '');
+  const rep = r.report;
+  const sum = document.getElementById('qcSummary');
+  if (!rep) {
+    sum.innerHTML = '<span class="dim">暂无报告，请点击“重算”。</span>';
+    document.querySelector('#qcRows tbody').innerHTML = '';
+  } else {
+    const stale = rep.status === 'stale' || !rep.is_current;
+    sum.innerHTML =
+      `报告 #${rep.id} ${qcTag(rep.status)} ` +
+      `· 计算于 ${rep.computed_at || '—'} · 快照代次 ${rep.gen} · ` +
+      `达标段 <b>${rep.segment_count}</b> 个，共 <b>${rep.observation_count}</b> 条观测` +
+      (stale ? ` <span class="stale-note">（仍可查看，结果可能已过时：${rep.stale_reason || ''}）</span>` : '');
+    const tb = document.querySelector('#qcRows tbody');
+    tb.innerHTML = rep.segments.map((s, i) =>
+      `<tr><td>${i + 1}</td><td class="mono">${s.start_ts}</td>` +
+      `<td class="mono">${s.end_ts}</td><td>${s.value}</td><td>${s.length}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="dim">无达标段（阈值内没有足够的连续等值整点观测）</td></tr>';
+  }
+  const last = r.latest_attempt;
+  document.getElementById('qcAttempts').innerHTML =
+    `最近重算状态：${last ? qcTag(last.status) + ' ' + (last.error || '') +
+       ' · 提交于 ' + (last.started_at || '') : '—'}`;
+}
+
+async function doQcRecompute() {
+  const p = qcParams();
+  if (!p.station_id || !p.month) return;
+  try {
+    await api('/api/qc/recompute', {method:'POST', body: JSON.stringify({
+      ...p, delay_ms: +document.getElementById('qcDelay').value})});
+  } catch (e) { alert('无法开始重算：' + e.message); }
+  doQcLoad();
+}
+
 async function pollLog() {
   try {
     const r = await api('/api/logs?since=' + logSeq);
@@ -289,7 +403,9 @@ document.getElementById('qAuto').onchange = e => {
 setInterval(refresh, 1000);
 setInterval(pollLog, 1000);
 setInterval(() => { if (document.getElementById('qAuto').checked) doQuery(); }, 1000);
+setInterval(() => { if (document.getElementById('qcAuto').checked) doQcLoad(); }, 1000);
 refresh();
+loadQcOptions().then(doQcLoad);
 </script>
 </body>
 </html>

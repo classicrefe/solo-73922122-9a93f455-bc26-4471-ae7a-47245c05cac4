@@ -340,6 +340,9 @@ class MigrationWorker(threading.Thread):
         conn.execute("SET lock_timeout = '10s'")
         conn.execute("SET statement_timeout = '120s'")
         with conn.transaction():
+            # 0) 质控变更跟踪抑制：本次事务内只做"物理搬迁/挂载"，不含逻辑变更，
+            #    不应使质控报告过期或改变判定。SET LOCAL 随事务结束自动失效。
+            conn.execute("SET LOCAL qc.suppress_watch = 'on'")
             # 1) 一次性锁住整棵分区树（SHARE：挡写不挡读），避免与写入方
             #    “父表→分区”的加锁顺序形成循环等待；只此一步短暂锁表
             self._log("获取 observations 树 SHARE 锁（短暂挡写）…")
